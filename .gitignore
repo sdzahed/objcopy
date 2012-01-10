@@ -1,0 +1,6 @@
+*Makefile*
+*.a
+*.la
+*.lo
+*.o
+config.*

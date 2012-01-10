@@ -117,7 +117,8 @@ enum change_action
 {
     CHANGE_IGNORE,
     CHANGE_MODIFY,
-    CHANGE_SET
+    CHANGE_SET,
+    CHANGE_LAST
 };
 
 /* Structure used to hold lists of sections and actions to take.  */
@@ -134,6 +135,7 @@ struct section_list
     bfd_vma		lma_val;   /* Amount to change by or set to.  */
     bfd_boolean		set_flags; /* Whether to set the section flags.	 */
     flagword		flags;	   /* What to set the section flags to.	 */
+    bfd_boolean     intercept_sect; /* Is this a section added for interception.    */
 };
 
 static struct section_list *change_sections;
@@ -314,7 +316,8 @@ enum command_line_switch
     OPTION_SECTION_ALIGNMENT,
     OPTION_STACK,
     OPTION_INTERLEAVE_WIDTH,
-    OPTION_SUBSYSTEM
+    OPTION_SUBSYSTEM,
+    OPTION_ADD_INTERCEPT
 };
 
 /* Options to handle if running as "strip".  */
@@ -437,6 +440,7 @@ static struct option copy_options[] =
     {"section-alignment", required_argument, 0, OPTION_SECTION_ALIGNMENT},
     {"stack", required_argument, 0, OPTION_STACK},
     {"subsystem", required_argument, 0, OPTION_SUBSYSTEM},
+    {"intercept", no_argument, 0, OPTION_ADD_INTERCEPT},
     {0, no_argument, 0, 0}
 };
 
@@ -471,6 +475,7 @@ static const char *lookup_sym_redefinition (const char *);
 static bfd_vma last_vma_start = 0, last_vma_end = 0;
 //static bfd_vma last_lma_start = 0, last_lma_end = 0;
 
+#if 0
 static asection *
 add_text_section(bfd *ibfd, bfd *obfd)
 {
@@ -519,6 +524,7 @@ add_text_section(bfd *ibfd, bfd *obfd)
 
     return osec;
 }
+#endif
 
 static void
 copy_usage (FILE *stream, int exit_status)
@@ -577,6 +583,7 @@ copy_usage (FILE *stream, int exit_status)
         --set-section-flags <name>=<flags>\n\
         Set section <name>'s properties to <flags>\n\
         --add-section <name>=<file>   Add section <name> found in <file> to output\n\
+        --intercept Add system call interception\n\
         --rename-section <old>=<new>[,<flags>] Rename section <old> to <new>\n\
         --long-section-names {enable|disable|keep}\n\
         Handle long section names in Coff objects.\n\
@@ -1652,6 +1659,7 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
     {
         struct section_add *padd;
         struct section_list *pset;
+        unsigned int alignment_power = 0;
 
         for (padd = add_sections; padd != NULL; padd = padd->next)
         {
@@ -1662,8 +1670,25 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
                 pset->used = TRUE;
 
             flags = SEC_HAS_CONTENTS | SEC_READONLY | SEC_DATA;
-            if (pset != NULL && pset->set_flags)
+            if (pset != NULL && pset->intercept_sect)
+            {
+                asection *text_sect;
+                if (!(text_sect = bfd_get_section_by_name (obfd, ".text")))
+                {
+                    bfd_nonfatal_message (NULL, obfd, NULL,
+                            _("can't add section '%s'"), padd->name);
+                    return FALSE;
+                }
+                else
+                {
+                    flags = text_sect->flags;
+                    printf("Zahed: new text sect flags: %08x\n", (unsigned int)flags);
+                    alignment_power = bfd_section_alignment (obfd, text_sect);
+                }   
+            }else if (pset != NULL && pset->set_flags){
                 flags = pset->flags | SEC_HAS_CONTENTS;
+                alignment_power = bfd_section_alignment (obfd, padd->section);
+            }
 
             /* bfd_make_section_with_flags() does not return very helpful
                error codes, so check for the most likely user error first.  */
@@ -1698,6 +1723,8 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
 
             if (pset != NULL)
             {
+                if (pset->change_vma == CHANGE_LAST)
+                    pset->vma_val = last_vma_end;
                 if (pset->change_vma != CHANGE_IGNORE)
                     if (! bfd_set_section_vma (obfd, padd->section,
                                 pset->vma_val))
@@ -1708,11 +1735,13 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
 
                 if (pset->change_lma != CHANGE_IGNORE)
                 {
-                    padd->section->lma = pset->lma_val;
+                    if (pset->change_vma == CHANGE_LAST)
+                        padd->section->lma = last_vma_end;
+                    else
+                        padd->section->lma = pset->lma_val;
 
                     if (! bfd_set_section_alignment
-                            (obfd, padd->section,
-                             bfd_section_alignment (obfd, padd->section)))
+                            (obfd, padd->section, alignment_power))
                     {
                         bfd_nonfatal_message (NULL, obfd, padd->section, NULL);
                         return FALSE;
@@ -1722,12 +1751,14 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
         }
     }
 
+#if 0
     asection *osec;
     // associate asec with the .text section in obfd
     if((osec = add_text_section(ibfd, obfd)) == NULL) {
         bfd_perror("add_text_section failed");
         return FALSE;
     }
+#endif
 
     if (gnu_debuglink_filename != NULL)
     {
@@ -1939,15 +1970,18 @@ copy_object (bfd *ibfd, bfd *obfd, const bfd_arch_info_type *input_arch)
         }
     }
 
+#if 0
     char data[100];
-    int i;
-    for (i=0; i<100; i++)
-        data[i] = 0x90; //NOP
+    int j;
+    for (j=0; j<100; j++)
+        data[j] = 0x90; //NOP
+
     if(!bfd_set_section_contents(obfd, osec, data, 0, 100))
     {
         bfd_nonfatal_message (NULL, obfd, osec, NULL);
         return FALSE;
     }
+#endif
 
     if (gnu_debuglink_filename != NULL)
     {
@@ -3425,6 +3459,37 @@ copy_main (int argc, char *argv[])
 
             case OPTION_WEAKEN:
                 weaken = TRUE;
+                break;
+
+            case OPTION_ADD_INTERCEPT:
+                {
+                    size_t alloc, i;
+                    struct section_add *pa;
+                    struct section_list *pl;
+
+                    pa = (struct section_add *) xmalloc (sizeof (struct section_add));
+                    pa->name = ".text1";
+                    pa->filename = NULL;
+
+                    /* We don't use get_file_size so that we can do
+                       --add-section .note.GNU_stack=/dev/null
+                       get_file_size doesn't work on /dev/null.  */
+
+                    alloc = 100;
+                    pa->contents = (bfd_byte *) xmalloc (alloc);
+                    for (i=0; i < alloc; i++)
+                        pa->contents[i] = 0x90; // NOP
+
+                    pa->size = alloc;
+
+                    pa->next = add_sections;
+                    add_sections = pa;
+
+                    pl = find_section_list(pa->name, TRUE);
+                    pl->intercept_sect = TRUE;
+                    pl->change_vma = CHANGE_LAST;
+                    pl->change_lma = CHANGE_LAST;
+                }
                 break;
 
             case OPTION_ADD_SECTION:
